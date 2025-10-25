@@ -206,7 +206,7 @@ const x402AuthHeader = `x402 scheme="exact", network="base", payTo="${wallet.add
         // Mark as processed
         processedTxs.add(paymentTxHash);
 
-        res.json({
+        return res.status(200).json({
             success: true,
             message: 'Successfully minted 10,000 POG tokens!',
             txHash: mintTx.hash,
