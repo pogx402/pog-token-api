@@ -92,11 +92,8 @@ const x402AuthHeader = `x402 scheme="exact", network="base", payTo="${wallet.add
                     input: {
                         type: 'http',
                         method: 'GET',
-                        headerFields: {
-                            'x-payment-tx': {
-                                type: 'string',
-                                required: true,
-                                description: 'Transaction hash of the USDC payment'
+                        discoverable: true,
+                        properties: {}    
                             }
                         }
                     },
