@@ -75,7 +75,7 @@ app.get('/mint', async (req, res) => {
                 scheme: 'exact',
                 network: 'base',
                 maxAmountRequired: '1000000', // 1 USDC (6 decimals)
-                resource: '/mint',
+                resource: 'https://pog-token-api.vercel.app/mint',
                 description: 'Mint 10,000 $POG tokens - Pay 1 USDC on Base, get POG tokens instantly!',
                 mimeType: 'application/json',
                 payTo: wallet.address,
