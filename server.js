@@ -71,7 +71,7 @@ app.get('/mint', async (req, res) => {
     if (!paymentTxHash) {
         // Create the WWW-Authenticate header content
         const FACILITATOR_URL = 'https://x402.org/facilitator'; // Coinbase CDP Facilitator
-const x402AuthHeader = `x402 scheme="exact", network="base", payTo="${wallet.address}", maxAmountRequired="1000000", asset="${USDC_CONTRACT_ADDRESS}", resource="https://pog-token-api.vercel.app/mint", description="Mint 10,000 $POG tokens - Pay 1 USDC on Base, get POG tokens instantly!", facilitator="${FACILITATOR_URL}"`;
+        const x402AuthHeader = `x402 scheme="exact", network="base", payTo="${wallet.address}", maxAmountRequired="1000000", asset="${USDC_CONTRACT_ADDRESS}", resource="https://pog-token-api.vercel.app/mint", description="Mint 10,000 $POG tokens - Pay 1 USDC on Base, get POG tokens instantly!", facilitator="${FACILITATOR_URL}"`;
 
         // Set the WWW-Authenticate header and return 402
         res.set('WWW-Authenticate', x402AuthHeader);
@@ -93,9 +93,7 @@ const x402AuthHeader = `x402 scheme="exact", network="base", payTo="${wallet.add
                         type: 'http',
                         method: 'GET',
                         discoverable: true,
-                        properties: {}    
-                            }
-                        }
+                        properties: {}
                     },
                     output: {
                         type: 'object',
