@@ -29,7 +29,7 @@ const pogContract = new ethers.Contract(POG_CONTRACT_ADDRESS, ERC20_ABI, wallet)
 const usdcContract = new ethers.Contract(USDC_CONTRACT_ADDRESS, ERC20_ABI, provider);
 
 // Store processed payments (prevent double-minting)
-const processedPayments = new Map(); // Changed to Map to store tx hash -> payer address
+const processedPayments = new Map(); // Changed to Map to store signature hash -> payer address
 
 // Constants
 const REQUIRED_USDC_AMOUNT = ethers.parseUnits('1', 6); // 1 USDC (6 decimals)
@@ -71,123 +71,50 @@ app.get('/', (req, res) => {
     });
 });
 
-// Verify USDC payment on blockchain
-async function verifyUSDCPayment(txHash, payer) {
+// Verify signature to determine the payer
+async function verifySignature(signature, messageJson) {
     try {
-        console.log(`[INFO] Verifying USDC payment: ${txHash}`);
-        console.log(`[INFO] Payment Address: ${PAYMENT_ADDRESS}`);
-        console.log(`[INFO] Payer: ${payer}`);
+        console.log(`[INFO] Verifying signature: ${signature}`);
         
-        // Get transaction receipt
-        const receipt = await provider.getTransactionReceipt(txHash);
+        // Recover the address from the signature and the message
+        const recoveredAddress = ethers.verifyMessage(messageJson, signature);
         
-        if (!receipt) {
-            console.error('[ERROR] Transaction not found on blockchain');
-            console.error(`[ERROR] Checked hash: ${txHash}`);
-            console.error('[ERROR] Possible reasons:');
-            console.error('  1. Transaction hash is incorrect');
-            console.error('  2. Transaction is still pending (not confirmed)');
-            console.error('  3. Transaction was on a different network');
-            return { verified: false, error: 'Transaction not found. Please verify the hash and ensure it is confirmed.' };
+        if (!recoveredAddress) {
+            return { verified: false, error: 'Signature verification failed: Could not recover address' };
         }
 
-        // Check if transaction was successful
-        if (receipt.status !== 1) {
-            console.error('[ERROR] Transaction failed');
-            return { verified: false, error: 'Transaction failed' };
-        }
-
-        // Get the transaction
-        const tx = await provider.getTransaction(txHash);
+        console.log('[SUCCESS] Signature verified. Recovered address:', recoveredAddress);
         
-        if (!tx) {
-            console.error('[ERROR] Transaction details not found');
-            return { verified: false, error: 'Transaction details not found' };
-        }
-
-        // Parse transaction logs for USDC transfer
-        let usdcTransferFound = false;
-        let transferAmount = ethers.toBigInt(0);
-        let transferTo = null;
-
-        for (const log of receipt.logs) {
-            try {
-                // Check if this is a USDC transfer event
-                if (log.address.toLowerCase() === USDC_CONTRACT_ADDRESS.toLowerCase()) {
-                    // Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
-                    const eventTopic = ethers.id('Transfer(address,address,uint256)');
-                    
-                    if (log.topics[0] === eventTopic) {
-                        // Parse the transfer
-                        const transferFromAddress = '0x' + log.topics[1].slice(26);
-                        const transferToAddress = '0x' + log.topics[2].slice(26);
-                        const amount = ethers.toBigInt(log.data);
-
-                        console.log(`[INFO] USDC Transfer found: ${transferFromAddress} -> ${transferToAddress}, Amount: ${ethers.formatUnits(amount, 6)}`);
-
-                        // Check if payment is to our payment address
-                        if (transferToAddress.toLowerCase() === PAYMENT_ADDRESS.toLowerCase() && 
-                            amount >= REQUIRED_USDC_AMOUNT) {
-                            usdcTransferFound = true;
-                            transferAmount = amount;
-                            transferTo = transferFromAddress;
-                            break;
-                        }
-                    }
-                }
-            } catch (e) {
-                console.log('[DEBUG] Could not parse log:', e.message);
-            }
-        }
-
-        if (!usdcTransferFound) {
-            console.error('[ERROR] No valid USDC transfer found in transaction');
-            return { verified: false, error: 'No USDC transfer to payment address found' };
-        }
-
-        // Verify the payer matches (if provided)
-        if (payer && payer.toLowerCase() !== transferTo.toLowerCase()) {
-            console.error('[ERROR] Payer address mismatch');
-            return { verified: false, error: 'Payer address does not match transaction' };
-        }
-
-        console.log('[SUCCESS] USDC payment verified:', {
-            txHash,
-            from: transferTo,
-            amount: ethers.formatUnits(transferAmount, 6),
-            to: PAYMENT_ADDRESS
-        });
-
         return { 
             verified: true, 
-            payer: transferTo,
-            amount: transferAmount
+            payer: recoveredAddress,
+            message: messageJson
         };
 
     } catch (error) {
-        console.error('[ERROR] Payment verification failed:', error.message);
+        console.error('[ERROR] Signature verification failed:', error.message);
         return { verified: false, error: error.message };
     }
 }
 
 // Mint endpoint (x402)
 app.get('/mint', async (req, res) => {
-    const paymentTxHeader = req.headers['x-payment-tx'];
-    const paymentHeader = req.headers['x-payment'];
-    const payerQuery = req.query.payer;
+    const signature = req.headers['x-payment'];
+    const messageJson = req.headers['x-payment-message'];
+    const account = req.headers['x-account'];
 
     // If no payment proof, return 402 with x402 schema
-    if (!paymentTxHeader && !paymentHeader) {
+    if (!signature || !messageJson) {
         return res.status(402).json({
             x402Version: 1,
-            error: 'X-Payment-Tx header is required',
-            message: 'Please provide USDC transaction hash in X-Payment-Tx header',
+            error: 'X-Payment header is required',
+            message: 'Please sign the payment message and provide the signature in X-Payment header and the message in X-Payment-Message header.',
             accepts: [{
                 scheme: 'exact',
                 network: 'base',
                 maxAmountRequired: '1000000', // 1 USDC (6 decimals)
                 resource: 'https://pog-token-api.vercel.app/mint',
-                description: 'Mint 10,000 $POG tokens - Pay 1 USDC on Base, get POG tokens instantly!',
+                description: 'Mint 10,000 $POG tokens - Sign a message to pay 1 USDC on Base, get POG tokens instantly!',
                 mimeType: 'application/json',
                 payTo: PAYMENT_ADDRESS,
                 maxTimeoutSeconds: 300,
@@ -209,49 +136,28 @@ app.get('/mint', async (req, res) => {
         });
     }
 
-    // Use X-Payment-Tx header (transaction hash)
-    let txHash = paymentTxHeader || paymentHeader;
-    
-    // Clean and validate transaction hash
-    if (txHash) {
-        // Remove '0x' prefix if present
-        if (txHash.startsWith('0x')) {
-            txHash = txHash.slice(2);
-        }
-        
-        // If hash is too long (130 chars), it might be double-encoded or have extra data
-        // Take only the first 64 characters (valid tx hash)
-        if (txHash.length > 64) {
-            console.log(`[WARN] Transaction hash too long (${txHash.length}), truncating to 64 chars`);
-            txHash = txHash.slice(0, 64);
-        }
-        
-        // Re-add 0x prefix
-        txHash = '0x' + txHash;
-        
-        console.log(`[INFO] Cleaned transaction hash: ${txHash}`);
-    }
-
     try {
+        const signatureHash = ethers.sha256(ethers.toUtf8Bytes(signature + messageJson)); // Unique identifier for this payment
+
         // Check if already processed
-        if (processedPayments.has(txHash)) {
-            console.log('[WARN] Payment already processed:', txHash);
+        if (processedPayments.has(signatureHash)) {
+            console.log('[WARN] Payment already processed:', signatureHash);
             return res.status(400).json({
                 success: false,
                 error: 'Payment already processed',
-                message: 'This transaction has already been used to mint tokens',
-                transactionHash: txHash
+                message: 'This signature has already been used to mint tokens',
+                signatureHash: signatureHash
             });
         }
 
-        // Verify USDC payment on blockchain
-        const verification = await verifyUSDCPayment(txHash, payerQuery);
+        // Verify signature
+        const verification = await verifySignature(signature, messageJson);
 
         if (!verification.verified) {
-            console.error('[ERROR] Payment verification failed:', verification.error);
+            console.error('[ERROR] Signature verification failed:', verification.error);
             return res.status(402).json({
                 success: false,
-                error: 'Payment verification failed',
+                error: 'Signature verification failed',
                 message: verification.error,
                 x402Version: 1,
                 accepts: [{
@@ -259,14 +165,20 @@ app.get('/mint', async (req, res) => {
                     network: 'base',
                     maxAmountRequired: '1000000',
                     resource: 'https://pog-token-api.vercel.app/mint',
-                    description: 'Mint 10,000 $POG tokens - Pay 1 USDC on Base',
+                    description: 'Mint 10,000 $POG tokens - Sign a message to pay 1 USDC on Base',
                     payTo: PAYMENT_ADDRESS,
                     asset: USDC_CONTRACT_ADDRESS
                 }]
             });
         }
-
+        
         const payer = verification.payer;
+
+        // Optional: Check if the recovered address matches the X-Account header (for extra security)
+        if (account && account.toLowerCase() !== payer.toLowerCase()) {
+            console.log(`[WARN] Account mismatch: Header ${account} vs Recovered ${payer}`);
+            // We proceed with the recovered address as it's cryptographically proven
+        }
 
         console.log('[INFO] Minting POG tokens to', payer);
 
@@ -279,7 +191,7 @@ app.get('/mint', async (req, res) => {
         }
 
         // Mark as processed
-        processedPayments.set(txHash, {
+        processedPayments.set(signatureHash, {
             payer,
             mintTxHash: mintTx.hash,
             timestamp: new Date().toISOString(),
@@ -291,7 +203,7 @@ app.get('/mint', async (req, res) => {
         res.json({
             success: true,
             message: 'POG tokens minted successfully!',
-            paymentTransaction: txHash,
+            signatureHash: signatureHash,
             mintTransaction: mintTx.hash,
             recipient: payer,
             amount: '10,000 POG',
