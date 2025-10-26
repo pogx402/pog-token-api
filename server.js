@@ -65,24 +65,57 @@ app.get('/', (req, res) => {
 
 // Helper function to extract transaction hash from x402 payment data
 function extractTxHash(paymentHeader) {
+    console.log('[DEBUG] Payment header received:', paymentHeader);
+    
     // Try to decode if it's base64
     try {
         const decoded = Buffer.from(paymentHeader, 'base64').toString('utf-8');
         const paymentData = JSON.parse(decoded);
+        console.log('[DEBUG] Decoded payment data:', JSON.stringify(paymentData, null, 2));
         
-        // Check if there's a transaction hash in the payload
-        if (paymentData.payload && paymentData.payload.transactionHash) {
-            return paymentData.payload.transactionHash;
+        // Check various possible locations for transaction hash
+        if (paymentData.payload) {
+            // Check for transactionHash
+            if (paymentData.payload.transactionHash) {
+                console.log('[DEBUG] Found tx hash in payload.transactionHash');
+                return paymentData.payload.transactionHash;
+            }
+            // Check for txHash
+            if (paymentData.payload.txHash) {
+                console.log('[DEBUG] Found tx hash in payload.txHash');
+                return paymentData.payload.txHash;
+            }
+            // Check for hash
+            if (paymentData.payload.hash) {
+                console.log('[DEBUG] Found tx hash in payload.hash');
+                return paymentData.payload.hash;
+            }
         }
         
-        // If it's an authorization, we can't use it directly
-        // Return null to indicate we need actual transaction
+        // Check top level
+        if (paymentData.transactionHash) {
+            console.log('[DEBUG] Found tx hash in transactionHash');
+            return paymentData.transactionHash;
+        }
+        if (paymentData.txHash) {
+            console.log('[DEBUG] Found tx hash in txHash');
+            return paymentData.txHash;
+        }
+        if (paymentData.hash) {
+            console.log('[DEBUG] Found tx hash in hash');
+            return paymentData.hash;
+        }
+        
+        console.log('[DEBUG] No transaction hash found in decoded data');
         return null;
     } catch (e) {
+        console.log('[DEBUG] Not base64/JSON, checking if direct tx hash');
         // If not base64/JSON, assume it's a direct transaction hash
         if (paymentHeader.startsWith('0x') && paymentHeader.length === 66) {
+            console.log('[DEBUG] Valid direct tx hash');
             return paymentHeader;
         }
+        console.log('[DEBUG] Invalid format:', e.message);
         return null;
     }
 }
