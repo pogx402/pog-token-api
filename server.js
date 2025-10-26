@@ -75,13 +75,20 @@ app.get('/', (req, res) => {
 async function verifyUSDCPayment(txHash, payer) {
     try {
         console.log(`[INFO] Verifying USDC payment: ${txHash}`);
+        console.log(`[INFO] Payment Address: ${PAYMENT_ADDRESS}`);
+        console.log(`[INFO] Payer: ${payer}`);
         
         // Get transaction receipt
         const receipt = await provider.getTransactionReceipt(txHash);
         
         if (!receipt) {
             console.error('[ERROR] Transaction not found on blockchain');
-            return { verified: false, error: 'Transaction not found' };
+            console.error(`[ERROR] Checked hash: ${txHash}`);
+            console.error('[ERROR] Possible reasons:');
+            console.error('  1. Transaction hash is incorrect');
+            console.error('  2. Transaction is still pending (not confirmed)');
+            console.error('  3. Transaction was on a different network');
+            return { verified: false, error: 'Transaction not found. Please verify the hash and ensure it is confirmed.' };
         }
 
         // Check if transaction was successful
