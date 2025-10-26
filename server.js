@@ -65,29 +65,23 @@ app.get('/', (req, res) => {
 
 // Mint endpoint (x402)
 app.get('/mint', async (req, res) => {
-    const paymentTxHash = req.headers['x-payment-tx'];
+    const paymentHeader = req.headers['x-payment'] || req.headers['x-payment-tx'];
 
     // If no payment proof, return 402 with x402 schema
-    if (!paymentTxHash) {
-        // Create the WWW-Authenticate header content
-        const FACILITATOR_URL = 'https://x402.org/facilitator'; // Coinbase CDP Facilitator
-        const x402AuthHeader = `x402 scheme="exact", network="base", payTo="${wallet.address}", maxAmountRequired="1000000", asset="${USDC_CONTRACT_ADDRESS}", resource="https://pog-token-api.vercel.app/mint", description="Mint 10,000 $POG tokens - Pay 1 USDC on Base, get POG tokens instantly!", facilitator="${FACILITATOR_URL}"`;
-
-        // Set the WWW-Authenticate header and return 402
-        res.set('WWW-Authenticate', x402AuthHeader);
+    if (!paymentHeader) {
         return res.status(402).json({
             x402Version: 1,
+            error: 'X-PAYMENT header is required',
             accepts: [{
                 scheme: 'exact',
                 network: 'base',
                 maxAmountRequired: '1000000', // 1 USDC (6 decimals)
                 resource: 'https://pog-token-api.vercel.app/mint',
                 description: 'Mint 10,000 $POG tokens - Pay 1 USDC on Base, get POG tokens instantly!',
-                mimeType: 'application/json',
+                mimeType: '',
                 payTo: wallet.address,
-                maxTimeoutSeconds: 300,
+                maxTimeoutSeconds: 60,
                 asset: USDC_CONTRACT_ADDRESS,
-
                 outputSchema: {
                     input: {
                         type: 'http',
@@ -98,38 +92,33 @@ app.get('/mint', async (req, res) => {
                     output: {
                         type: 'object',
                         properties: {
-                            success: { 
-                                type: 'boolean',
-                                description: 'Whether the minting was successful'
+                            success: {
+                                type: 'boolean'
                             },
-                            message: { 
-                                type: 'string',
-                                description: 'Success or error message'
+                            transactionHash: {
+                                type: 'string'
                             },
-                            txHash: { 
-                                type: 'string',
-                                description: 'Transaction hash of the POG token transfer'
+                            recipient: {
+                                type: 'string'
                             },
-                            amount: { 
-                                type: 'string',
-                                description: 'Amount of POG tokens minted'
-                            },
-                            recipient: { 
-                                type: 'string',
-                                description: 'Address that received the POG tokens'
+                            amount: {
+                                type: 'string'
                             }
                         }
                     }
+                },
+                extra: {
+                    name: 'POG Token',
+                    version: '2'
                 }
-            }],
-            error: 'Payment required to mint POG tokens'
+            }]
         });
     }
 
     // Verify payment
     try {
         // Check if already processed
-        if (processedTxs.has(paymentTxHash)) {
+        if (processedTxs.has(paymentHeader)) {
             return res.status(400).json({
                 success: false,
                 error: 'Payment already processed',
@@ -138,7 +127,7 @@ app.get('/mint', async (req, res) => {
         }
 
         // Get transaction
-        const tx = await provider.getTransaction(paymentTxHash);
+        const tx = await provider.getTransaction(paymentHeader);
         if (!tx) {
             return res.status(400).json({
                 success: false,
@@ -199,15 +188,13 @@ app.get('/mint', async (req, res) => {
         await mintTx.wait();
 
         // Mark as processed
-        processedTxs.add(paymentTxHash);
+        processedTxs.add(paymentHeader);
 
-        return res.status(200).json({
+        res.json({
             success: true,
-            message: 'Successfully minted 10,000 POG tokens!',
-            txHash: mintTx.hash,
-            amount: '10000 POG',
+            transactionHash: mintTx.hash,
             recipient: payer,
-            viewOnBaseScan: `https://basescan.org/tx/${mintTx.hash}`
+            amount: '10000 POG'
         });
 
     } catch (error) {
