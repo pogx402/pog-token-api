@@ -17,17 +17,7 @@ const USDC_CONTRACT_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'; // B
 const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-// USDC ABI with Permit (EIP-2612)
-const USDC_ABI = [
-    'function transfer(address to, uint256 amount) returns (bool)',
-    'function balanceOf(address account) view returns (uint256)',
-    'function transferFrom(address from, address to, uint256 amount) returns (bool)',
-    'function allowance(address owner, address spender) view returns (uint256)',
-    'function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)',
-    'event Transfer(address indexed from, address indexed to, uint256 value)',
-    'event Approval(address indexed owner, address indexed spender, uint256 value)'
-];
-
+// ERC-20 ABI (minimal)
 const ERC20_ABI = [
     'function transfer(address to, uint256 amount) returns (bool)',
     'function balanceOf(address account) view returns (uint256)',
@@ -35,9 +25,8 @@ const ERC20_ABI = [
 ];
 
 const pogContract = new ethers.Contract(POG_CONTRACT_ADDRESS, ERC20_ABI, wallet);
-const usdcContract = new ethers.Contract(USDC_CONTRACT_ADDRESS, USDC_ABI, wallet);
 
-// Store processed payments
+// Store processed payments (prevent double-minting)
 const processedPayments = new Set();
 
 // Root endpoint
@@ -45,16 +34,16 @@ app.get('/', (req, res) => {
     res.json({
         name: 'POG Token x402 API',
         description: 'Mint POG tokens using x402 Protocol - No frontend needed!',
-        version: '2.2.0',
+        version: '2.3.0-free',
         endpoints: {
             '/': 'API information',
-            '/mint': 'Mint 10,000 POG tokens for 1 USDC (x402)',
+            '/mint': 'Mint 10,000 POG tokens (FREE for testing)',
             '/stats': 'Minting statistics'
         },
         x402: {
             version: 1,
             resource: '/mint',
-            price: '1 USDC',
+            price: '1 USDC (not enforced yet)',
             reward: '10,000 POG tokens'
         },
         contract: {
@@ -64,10 +53,11 @@ app.get('/', (req, res) => {
             symbol: 'POG',
             name: 'POG'
         },
+        notice: 'Currently in FREE mode for testing - USDC payment not enforced',
         usage: {
             '1': 'Visit x402scan.com',
             '2': 'Search for this API or paste the URL',
-            '3': 'Sign the payment authorization',
+            '3': 'Click to authorize (no actual payment required yet)',
             '4': 'Receive 10,000 POG tokens automatically'
         }
     });
@@ -111,30 +101,29 @@ app.get('/mint', async (req, res) => {
     try {
         // Decode x402 payment data
         let paymentData;
+        let payer;
+        let paymentId;
+
         try {
             const decoded = Buffer.from(paymentHeader, 'base64').toString('utf-8');
             paymentData = JSON.parse(decoded);
             console.log('[INFO] Received x402 payment authorization');
+            
+            // Extract payer address
+            if (paymentData.payload && paymentData.payload.authorization) {
+                payer = paymentData.payload.authorization.from;
+                paymentId = paymentData.payload.signature;
+            } else {
+                throw new Error('Missing authorization data');
+            }
         } catch (e) {
+            console.error('[ERROR] Failed to parse payment data:', e.message);
             return res.status(400).json({
                 success: false,
                 error: 'Invalid payment format',
                 message: 'Payment data must be base64-encoded JSON'
             });
         }
-
-        // Extract authorization data
-        if (!paymentData.payload || !paymentData.payload.authorization) {
-            return res.status(400).json({
-                success: false,
-                error: 'Missing authorization data'
-            });
-        }
-
-        const auth = paymentData.payload.authorization;
-        const signature = paymentData.payload.signature;
-        const payer = auth.from;
-        const paymentId = signature;
 
         // Check if already processed
         if (processedPayments.has(paymentId)) {
@@ -144,79 +133,10 @@ app.get('/mint', async (req, res) => {
             });
         }
 
-        // Verify payment amount
-        const paymentAmount = parseInt(auth.value);
-        if (paymentAmount < 1000000) {
-            return res.status(400).json({
-                success: false,
-                error: 'Insufficient payment amount',
-                message: 'Must pay at least 1 USDC'
-            });
-        }
-
-        // Verify recipient
-        if (auth.to.toLowerCase() !== wallet.address.toLowerCase()) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid payment recipient',
-                message: `Payment must be sent to ${wallet.address}`
-            });
-        }
-
-        // Split signature into v, r, s
-        const sig = ethers.Signature.from(signature);
-
-        console.log('[INFO] Attempting permit + transferFrom...');
-
-        // Try Permit (EIP-2612) approach
-        try {
-            // Execute permit to approve our wallet
-            const permitTx = await usdcContract.permit(
-                auth.from,           // owner
-                wallet.address,      // spender (us)
-                auth.value,          // value
-                auth.validBefore,    // deadline
-                sig.v,
-                sig.r,
-                sig.s
-            );
-            
-            console.log('[INFO] Permit transaction sent:', permitTx.hash);
-            const permitReceipt = await permitTx.wait();
-            
-            if (!permitReceipt || permitReceipt.status !== 1) {
-                throw new Error('Permit transaction failed');
-            }
-            
-            console.log('[INFO] Permit successful, executing transferFrom...');
-            
-            // Now transfer USDC from user to us
-            const transferTx = await usdcContract.transferFrom(
-                auth.from,
-                wallet.address,
-                auth.value
-            );
-            
-            console.log('[INFO] TransferFrom transaction sent:', transferTx.hash);
-            const transferReceipt = await transferTx.wait();
-            
-            if (!transferReceipt || transferReceipt.status !== 1) {
-                throw new Error('USDC transfer failed');
-            }
-            
-            console.log('[INFO] USDC transfer successful');
-            
-        } catch (permitError) {
-            console.error('[ERROR] Permit/TransferFrom failed:', permitError.message);
-            return res.status(400).json({
-                success: false,
-                error: 'Payment authorization failed',
-                message: permitError.message
-            });
-        }
+        console.log('[INFO] Minting POG tokens to', payer);
+        console.log('[NOTICE] FREE MODE - No USDC payment verification');
 
         // Mint POG tokens to payer
-        console.log('[INFO] Minting POG tokens to', payer);
         const mintAmount = ethers.parseEther('10000'); // 10,000 POG
         const mintTx = await pogContract.transfer(payer, mintAmount);
         const mintReceipt = await mintTx.wait();
@@ -230,7 +150,8 @@ app.get('/mint', async (req, res) => {
             success: true,
             transactionHash: mintTx.hash,
             recipient: payer,
-            amount: '10000 POG'
+            amount: '10000 POG',
+            notice: 'FREE mode - No USDC payment required'
         });
 
     } catch (error) {
@@ -252,10 +173,11 @@ app.get('/stats', async (req, res) => {
         res.json({
             totalMints: processedPayments.size,
             remainingSupply: `${remaining} POG`,
-            pricePerMint: '1 USDC',
+            pricePerMint: '1 USDC (not enforced)',
             tokensPerMint: '10,000 POG',
             network: 'Base Mainnet',
-            paymentAddress: wallet.address
+            paymentAddress: wallet.address,
+            mode: 'FREE (testing)'
         });
     } catch (error) {
         res.status(500).json({
@@ -271,7 +193,8 @@ app.listen(PORT, () => {
     console.log(`📍 Payment Address: ${wallet.address}`);
     console.log(`🪙 POG Contract: ${POG_CONTRACT_ADDRESS}`);
     console.log(`💰 USDC Contract: ${USDC_CONTRACT_ADDRESS}`);
-    console.log(`\n✅ API is ready to accept payments!`);
+    console.log(`\n⚠️  FREE MODE - No USDC payment verification`);
+    console.log(`✅ API is ready to mint POG tokens!`);
 });
 
 export default app;
