@@ -17,17 +17,24 @@ const USDC_CONTRACT_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'; // B
 const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-// ERC-20 ABI (minimal)
+// ERC-20 ABI with EIP-3009 support
+const USDC_ABI = [
+    'function transfer(address to, uint256 amount) returns (bool)',
+    'function balanceOf(address account) view returns (uint256)',
+    'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)',
+    'function authorizationState(address authorizer, bytes32 nonce) view returns (bool)',
+    'event Transfer(address indexed from, address indexed to, uint256 value)',
+    'event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)'
+];
+
 const ERC20_ABI = [
     'function transfer(address to, uint256 amount) returns (bool)',
     'function balanceOf(address account) view returns (uint256)',
-    'function transferFrom(address from, address to, uint256 amount) returns (bool)',
-    'function allowance(address owner, address spender) view returns (uint256)',
     'event Transfer(address indexed from, address indexed to, uint256 value)'
 ];
 
 const pogContract = new ethers.Contract(POG_CONTRACT_ADDRESS, ERC20_ABI, wallet);
-const usdcContract = new ethers.Contract(USDC_CONTRACT_ADDRESS, ERC20_ABI, provider);
+const usdcContract = new ethers.Contract(USDC_CONTRACT_ADDRESS, USDC_ABI, wallet);
 
 // Store processed payments
 const processedPayments = new Set();
@@ -131,12 +138,15 @@ app.get('/mint', async (req, res) => {
 
         let payer;
         let paymentId;
+        let usdcTransferTx;
 
         if (paymentData && paymentData.payload && paymentData.payload.authorization) {
             // x402 Protocol payment with EIP-712 signature
             const auth = paymentData.payload.authorization;
+            const signature = paymentData.payload.signature;
+            
             payer = auth.from;
-            paymentId = paymentData.payload.signature;
+            paymentId = signature;
 
             // Check if already processed
             if (processedPayments.has(paymentId)) {
@@ -165,8 +175,40 @@ app.get('/mint', async (req, res) => {
                 });
             }
 
-            // For now, we trust the signature verification done by x402scan
-            // In production, you should verify the EIP-712 signature here
+            // Split signature into v, r, s
+            const sig = ethers.Signature.from(signature);
+            
+            // Execute USDC transfer using EIP-3009
+            try {
+                const transferTx = await usdcContract.transferWithAuthorization(
+                    auth.from,
+                    auth.to,
+                    auth.value,
+                    auth.validAfter,
+                    auth.validBefore,
+                    auth.nonce,
+                    sig.v,
+                    sig.r,
+                    sig.s
+                );
+                
+                usdcTransferTx = await transferTx.wait();
+                
+                if (!usdcTransferTx || usdcTransferTx.status !== 1) {
+                    return res.status(400).json({
+                        success: false,
+                        error: 'USDC transfer failed',
+                        message: 'Failed to execute USDC payment'
+                    });
+                }
+            } catch (error) {
+                console.error('USDC transfer error:', error);
+                return res.status(400).json({
+                    success: false,
+                    error: 'USDC transfer failed',
+                    message: error.message
+                });
+            }
 
         } else {
             // Legacy: Direct transaction hash
