@@ -71,28 +71,71 @@ app.get('/', (req, res) => {
     });
 });
 
-// Verify signature to determine the payer
-async function verifySignature(signature, messageJson) {
+// Verify and execute EIP-712 TransferWithAuthorization
+async function verifyAndExecuteEIP712(signature, messageJson) {
     try {
-        console.log(`[INFO] Verifying signature: ${signature}`);
+        console.log(`[INFO] Verifying EIP-712 signature: ${signature}`);
         
-        // Recover the address from the signature and the message
-        const recoveredAddress = ethers.verifyMessage(messageJson, signature);
+        const typedData = JSON.parse(messageJson);
+        const domain = typedData.domain;
+        const types = typedData.types;
+        const value = typedData.message;
+        const primaryType = typedData.primaryType;
         
-        if (!recoveredAddress) {
-            return { verified: false, error: 'Signature verification failed: Could not recover address' };
+        // 1. Verify the signature (EIP-712 specific)
+        const recoveredAddress = ethers.verifyTypedData(domain, types, value, signature);
+        
+        if (recoveredAddress.toLowerCase() !== value.from.toLowerCase()) {
+            return { verified: false, error: 'EIP-712 Signature verification failed: Recovered address does not match message.from' };
+        }
+        
+        // 2. Check if the payment has already been processed (using a unique hash of the signature + nonce)
+        const signatureHash = ethers.sha256(ethers.toUtf8Bytes(signature + value.nonce));
+        if (processedPayments.has(signatureHash)) {
+            return { verified: false, error: 'Payment already processed (Nonce reused)', signatureHash: signatureHash };
         }
 
-        console.log('[SUCCESS] Signature verified. Recovered address:', recoveredAddress);
+        // 3. Execute the TransferWithAuthorization Meta-Transaction
+        console.log(`[INFO] Executing TransferWithAuthorization from ${value.from} to ${value.to} for ${value.value} USDC`);
+
+        // USDC Contract ABI for TransferWithAuthorization (minimal)
+        const USDC_ABI_TRANSFER_AUTH = [
+            'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes calldata signature) external'
+        ];
+        
+        // Create a contract instance with the wallet (signer)
+        const usdcContractWithSigner = new ethers.Contract(domain.verifyingContract, USDC_ABI_TRANSFER_AUTH, wallet);
+        
+        // The signature is a bytes array, we need to split it into r, s, v for the contract call
+        // Ethers v6 handles the splitting automatically when passing the full signature string
+        
+        const tx = await usdcContractWithSigner.transferWithAuthorization(
+            value.from,
+            value.to,
+            value.value,
+            value.validAfter,
+            value.validBefore,
+            value.nonce,
+            signature
+        );
+
+        const receipt = await tx.wait();
+
+        if (!receipt || receipt.status !== 1) {
+            throw new Error('TransferWithAuthorization transaction failed');
+        }
+
+        console.log('[SUCCESS] TransferWithAuthorization executed:', tx.hash);
         
         return { 
             verified: true, 
             payer: recoveredAddress,
-            message: messageJson
+            transferTxHash: tx.hash,
+            signatureHash: signatureHash
         };
 
     } catch (error) {
-        console.error('[ERROR] Signature verification failed:', error.message);
+        console.error('[ERROR] EIP-712 Verification and Execution failed:', error.message);
         return { verified: false, error: error.message };
     }
 }
@@ -108,13 +151,13 @@ app.get('/mint', async (req, res) => {
         return res.status(402).json({
             x402Version: 1,
             error: 'X-Payment header is required',
-            message: 'Please sign the payment message and provide the signature in X-Payment header and the message in X-Payment-Message header.',
+            message: 'Please sign the EIP-712 payment message and provide the signature in X-Payment header and the message in X-Payment-Message header.',
             accepts: [{
                 scheme: 'exact',
                 network: 'base',
                 maxAmountRequired: '1000000', // 1 USDC (6 decimals)
                 resource: 'https://pog-token-api.vercel.app/mint',
-                description: 'Mint 10,000 $POG tokens - Sign a message to pay 1 USDC on Base, get POG tokens instantly!',
+                description: 'Mint 10,000 $POG tokens - Sign EIP-712 to pay 1 USDC on Base, get POG tokens instantly!',
                 mimeType: 'application/json',
                 payTo: PAYMENT_ADDRESS,
                 maxTimeoutSeconds: 300,
@@ -137,27 +180,14 @@ app.get('/mint', async (req, res) => {
     }
 
     try {
-        const signatureHash = ethers.sha256(ethers.toUtf8Bytes(signature + messageJson)); // Unique identifier for this payment
-
-        // Check if already processed
-        if (processedPayments.has(signatureHash)) {
-            console.log('[WARN] Payment already processed:', signatureHash);
-            return res.status(400).json({
-                success: false,
-                error: 'Payment already processed',
-                message: 'This signature has already been used to mint tokens',
-                signatureHash: signatureHash
-            });
-        }
-
-        // Verify signature
-        const verification = await verifySignature(signature, messageJson);
+        // Step 1: Verify EIP-712 signature and execute TransferWithAuthorization
+        const verification = await verifyAndExecuteEIP712(signature, messageJson);
 
         if (!verification.verified) {
-            console.error('[ERROR] Signature verification failed:', verification.error);
+            console.error('[ERROR] EIP-712 Verification and Execution failed:', verification.error);
             return res.status(402).json({
                 success: false,
-                error: 'Signature verification failed',
+                error: 'Payment verification failed',
                 message: verification.error,
                 x402Version: 1,
                 accepts: [{
@@ -165,7 +195,7 @@ app.get('/mint', async (req, res) => {
                     network: 'base',
                     maxAmountRequired: '1000000',
                     resource: 'https://pog-token-api.vercel.app/mint',
-                    description: 'Mint 10,000 $POG tokens - Sign a message to pay 1 USDC on Base',
+                    description: 'Mint 10,000 $POG tokens - Sign EIP-712 to pay 1 USDC on Base',
                     payTo: PAYMENT_ADDRESS,
                     asset: USDC_CONTRACT_ADDRESS
                 }]
@@ -173,6 +203,8 @@ app.get('/mint', async (req, res) => {
         }
         
         const payer = verification.payer;
+        const signatureHash = verification.signatureHash;
+        const transferTxHash = verification.transferTxHash;
 
         // Optional: Check if the recovered address matches the X-Account header (for extra security)
         if (account && account.toLowerCase() !== payer.toLowerCase()) {
@@ -180,6 +212,7 @@ app.get('/mint', async (req, res) => {
             // We proceed with the recovered address as it's cryptographically proven
         }
 
+        // Step 2: Mint POG tokens to payer
         console.log('[INFO] Minting POG tokens to', payer);
 
         // Mint POG tokens to payer
@@ -194,6 +227,7 @@ app.get('/mint', async (req, res) => {
         processedPayments.set(signatureHash, {
             payer,
             mintTxHash: mintTx.hash,
+            transferTxHash: transferTxHash,
             timestamp: new Date().toISOString(),
             amount: '10000 POG'
         });
@@ -203,7 +237,7 @@ app.get('/mint', async (req, res) => {
         res.json({
             success: true,
             message: 'POG tokens minted successfully!',
-            signatureHash: signatureHash,
+            paymentTransaction: transferTxHash, // The actual payment transaction
             mintTransaction: mintTx.hash,
             recipient: payer,
             amount: '10,000 POG',
