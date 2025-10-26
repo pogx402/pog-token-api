@@ -83,7 +83,36 @@ async function verifyAndExecuteEIP712(signature, messageJson) {
         const primaryType = typedData.primaryType;
         
         // 1. Verify the signature (EIP-712 specific)
-        const recoveredAddress = ethers.verifyTypedData(domain, types, value, signature);
+        // EIP-712 signatures often return v=0/1 instead of v=27/28. We must handle this.
+        let recoveredAddress;
+        let finalSignature = signature;
+        
+        try {
+            // Try with the original signature first
+            recoveredAddress = ethers.verifyTypedData(domain, types, value, signature);
+        } catch (e) {
+            console.log('[WARN] EIP-712 verification failed with original signature. Trying v-parameter adjustment.');
+            
+            // If it fails, try adjusting the v parameter
+            const sig = ethers.Signature.from(signature);
+            
+            // If v is 0 or 1, adjust it to 27 or 28
+            if (sig.v === 0 || sig.v === 1) {
+                sig.v += 27; // Convert 0/1 to 27/28
+                finalSignature = sig.serialized;
+                console.log(`[INFO] Adjusted v from ${sig.v - 27} to ${sig.v}. New signature: ${finalSignature}`);
+                
+                try {
+                    recoveredAddress = ethers.verifyTypedData(domain, types, value, finalSignature);
+                } catch (e2) {
+                    console.error('[ERROR] EIP-712 verification failed even after v-adjustment:', e2.message);
+                    return { verified: false, error: 'EIP-712 Signature verification failed: Could not recover address after v-adjustment' };
+                }
+            } else {
+                 console.error('[ERROR] EIP-712 verification failed with unexpected v-parameter:', sig.v);
+                 return { verified: false, error: 'EIP-712 Signature verification failed: Unexpected v-parameter' };
+            }
+        }
         
         if (recoveredAddress.toLowerCase() !== value.from.toLowerCase()) {
             return { verified: false, error: 'EIP-712 Signature verification failed: Recovered address does not match message.from' };
