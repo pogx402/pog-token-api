@@ -96,25 +96,7 @@ app.get('/mint', async (req, res) => {
                     input: {
                         type: 'http',
                         method: 'GET',
-                        discoverable: true,
-                        properties: {}
-                    },
-                    output: {
-                        type: 'object',
-                        properties: {
-                            success: {
-                                type: 'boolean'
-                            },
-                            transactionHash: {
-                                type: 'string'
-                            },
-                            recipient: {
-                                type: 'string'
-                            },
-                            amount: {
-                                type: 'string'
-                            }
-                        }
+                        discoverable: true
                     }
                 },
                 extra: {
