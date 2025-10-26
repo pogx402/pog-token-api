@@ -203,7 +203,27 @@ app.get('/mint', async (req, res) => {
     }
 
     // Use X-Payment-Tx header (transaction hash)
-    const txHash = paymentTxHeader || paymentHeader;
+    let txHash = paymentTxHeader || paymentHeader;
+    
+    // Clean and validate transaction hash
+    if (txHash) {
+        // Remove '0x' prefix if present
+        if (txHash.startsWith('0x')) {
+            txHash = txHash.slice(2);
+        }
+        
+        // If hash is too long (130 chars), it might be double-encoded or have extra data
+        // Take only the first 64 characters (valid tx hash)
+        if (txHash.length > 64) {
+            console.log(`[WARN] Transaction hash too long (${txHash.length}), truncating to 64 chars`);
+            txHash = txHash.slice(0, 64);
+        }
+        
+        // Re-add 0x prefix
+        txHash = '0x' + txHash;
+        
+        console.log(`[INFO] Cleaned transaction hash: ${txHash}`);
+    }
 
     try {
         // Check if already processed
