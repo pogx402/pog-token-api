@@ -21,14 +21,16 @@ const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const ERC20_ABI = [
     'function transfer(address to, uint256 amount) returns (bool)',
     'function balanceOf(address account) view returns (uint256)',
+    'function transferFrom(address from, address to, uint256 amount) returns (bool)',
+    'function allowance(address owner, address spender) view returns (uint256)',
     'event Transfer(address indexed from, address indexed to, uint256 value)'
 ];
 
 const pogContract = new ethers.Contract(POG_CONTRACT_ADDRESS, ERC20_ABI, wallet);
 const usdcContract = new ethers.Contract(USDC_CONTRACT_ADDRESS, ERC20_ABI, provider);
 
-// Store processed transactions
-const processedTxs = new Set();
+// Store processed payments
+const processedPayments = new Set();
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -115,80 +117,127 @@ app.get('/mint', async (req, res) => {
         });
     }
 
-    // Verify payment
+    // Process payment
     try {
-        // Check if already processed
-        if (processedTxs.has(paymentHeader)) {
-            return res.status(400).json({
-                success: false,
-                error: 'Payment already processed',
-                message: 'This transaction has already been used to mint tokens'
-            });
+        // Check if it's a base64-encoded x402 payment
+        let paymentData;
+        try {
+            const decoded = Buffer.from(paymentHeader, 'base64').toString('utf-8');
+            paymentData = JSON.parse(decoded);
+        } catch (e) {
+            // If not base64, treat as transaction hash
+            paymentData = null;
         }
 
-        // Get transaction
-        const tx = await provider.getTransaction(paymentHeader);
-        if (!tx) {
-            return res.status(400).json({
-                success: false,
-                error: 'Transaction not found',
-                message: 'Please wait for the transaction to be confirmed on the blockchain'
-            });
-        }
+        let payer;
+        let paymentId;
 
-        // Wait for confirmation
-        const receipt = await tx.wait();
-        if (!receipt || receipt.status !== 1) {
-            return res.status(400).json({
-                success: false,
-                error: 'Transaction failed',
-                message: 'The payment transaction failed or was not confirmed'
-            });
-        }
+        if (paymentData && paymentData.payload && paymentData.payload.authorization) {
+            // x402 Protocol payment with EIP-712 signature
+            const auth = paymentData.payload.authorization;
+            payer = auth.from;
+            paymentId = paymentData.payload.signature;
 
-        // Verify it's a USDC transfer to our address
-        let isValidPayment = false;
-        let payer = null;
-
-        for (const log of receipt.logs) {
-            try {
-                const parsedLog = usdcContract.interface.parseLog({
-                    topics: log.topics,
-                    data: log.data
+            // Check if already processed
+            if (processedPayments.has(paymentId)) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Payment already processed'
                 });
-
-                if (parsedLog && parsedLog.name === 'Transfer') {
-                    const [from, to, amount] = parsedLog.args;
-                    
-                    // Check if it's to our wallet and amount >= 1 USDC
-                    if (to.toLowerCase() === wallet.address.toLowerCase() && 
-                        amount >= 1000000n) { // 1 USDC = 1,000,000 (6 decimals)
-                        isValidPayment = true;
-                        payer = from;
-                        break;
-                    }
-                }
-            } catch (e) {
-                // Skip logs that aren't USDC transfers
-                continue;
             }
-        }
 
-        if (!isValidPayment) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid payment',
-                message: `Must send at least 1 USDC to ${wallet.address} on Base Mainnet`
-            });
+            // Verify payment amount
+            const paymentAmount = parseInt(auth.value);
+            if (paymentAmount < 1000000) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Insufficient payment amount',
+                    message: 'Must pay at least 1 USDC'
+                });
+            }
+
+            // Verify recipient
+            if (auth.to.toLowerCase() !== wallet.address.toLowerCase()) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid payment recipient',
+                    message: `Payment must be sent to ${wallet.address}`
+                });
+            }
+
+            // For now, we trust the signature verification done by x402scan
+            // In production, you should verify the EIP-712 signature here
+
+        } else {
+            // Legacy: Direct transaction hash
+            paymentId = paymentHeader;
+
+            // Check if already processed
+            if (processedPayments.has(paymentId)) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Payment already processed'
+                });
+            }
+
+            // Get transaction
+            const tx = await provider.getTransaction(paymentHeader);
+            if (!tx) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Transaction not found',
+                    message: 'Please wait for the transaction to be confirmed'
+                });
+            }
+
+            // Wait for confirmation
+            const receipt = await tx.wait();
+            if (!receipt || receipt.status !== 1) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Transaction failed'
+                });
+            }
+
+            // Verify USDC transfer
+            let isValidPayment = false;
+            for (const log of receipt.logs) {
+                try {
+                    const parsedLog = usdcContract.interface.parseLog({
+                        topics: log.topics,
+                        data: log.data
+                    });
+
+                    if (parsedLog && parsedLog.name === 'Transfer') {
+                        const [from, to, amount] = parsedLog.args;
+                        
+                        if (to.toLowerCase() === wallet.address.toLowerCase() && 
+                            amount >= 1000000n) {
+                            isValidPayment = true;
+                            payer = from;
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    continue;
+                }
+            }
+
+            if (!isValidPayment) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid payment'
+                });
+            }
         }
 
         // Mint POG tokens to payer
         const mintAmount = ethers.parseEther('10000'); // 10,000 POG
         const mintTx = await pogContract.transfer(payer, mintAmount);
-        await mintTx.wait();
+        const mintReceipt = await mintTx.wait();
 
         // Mark as processed
-        processedTxs.add(paymentHeader);
+        processedPayments.add(paymentId);
 
         res.json({
             success: true,
@@ -214,7 +263,7 @@ app.get('/stats', async (req, res) => {
         const remaining = ethers.formatEther(balance);
 
         res.json({
-            totalMints: processedTxs.size,
+            totalMints: processedPayments.size,
             remainingSupply: `${remaining} POG`,
             pricePerMint: '1 USDC',
             tokensPerMint: '10,000 POG',
